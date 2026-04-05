@@ -1,0 +1,32 @@
+# Telegram Bot Framework
+python-telegram-bot[all]==20.7
+
+# httpx — pinned to what python-telegram-bot 20.7 requires
+httpx==0.25.2
+
+# Pyrogram (Userbot layer)
+pyrogram==2.0.106
+tgcrypto==1.2.5
+
+# Supabase — 2.3.x is the last version compatible with httpx 0.25.x
+supabase==2.3.4
+postgrest==0.14.0
+
+# Environment
+python-dotenv==1.0.0
+
+# QR Code
+qrcode[pil]==7.4.2
+Pillow==10.2.0
+
+# PDF
+reportlab==4.0.7
+
+# Encryption
+cryptography==41.0.7
+
+# Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+
+pydantic==1.10.21
