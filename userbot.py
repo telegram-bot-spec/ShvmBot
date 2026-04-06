@@ -406,15 +406,15 @@ async def add_account_via_phone(phone: str) -> Tuple[bool, str, Optional[str]]:
             }
 
         logger.info("✅ OTP sent to %s", phone)
-        return True, "OTP sent successfully\\.", sent_code.phone_code_hash
+        return True, "OTP sent successfully.", sent_code.phone_code_hash
 
     except PhoneNumberInvalid:
-        return False, "Invalid phone number\\.", None
+        return False, "Invalid phone number.", None
     except FloodWait as exc:
-        return False, f"Too many attempts\\. Wait {exc.value}s\\.", None
+        return False, f"Too many attempts. Wait {exc.value}s.", None
     except Exception as exc:
         logger.error("❌ send_code failed for %s: %s", phone, exc)
-        return False, "Failed to send OTP\\. Try again\\.", None
+        return False, "Failed to send OTP. Try again.", None
 
 
 async def verify_otp_and_save(
@@ -438,7 +438,7 @@ async def verify_otp_and_save(
         pending = _pending_verifications.get(phone)
 
     if not pending:
-        return False, "Verification session expired\\. Please send OTP again\\."
+        return False, "Verification session expired. Please send OTP again."
 
     client          = pending["client"]
     phone_code_hash = pending["phone_code_hash"]
@@ -447,7 +447,7 @@ async def verify_otp_and_save(
         signed_in = await client.sign_in(phone, phone_code_hash, code)
 
     except PhoneCodeInvalid:
-        return False, "Invalid OTP code\\."
+        return False, "Invalid OTP code."
     except PhoneCodeExpired:
         async with _pending_lock:
             _pending_verifications.pop(phone, None)
@@ -455,10 +455,10 @@ async def verify_otp_and_save(
             await client.stop()
         except Exception:
             pass
-        return False, "OTP expired\\. Please request a new one\\."
+        return False, "OTP expired. Please request a new one."
     except SessionPasswordNeeded:
         if not twofa_password:
-            return False, "This account has 2FA enabled\\. Provide the password\\."
+            return False, "This account has 2FA enabled. Provide the password."
         try:
             signed_in = await client.check_password(twofa_password)
         except Exception as exc:
@@ -473,6 +473,33 @@ async def verify_otp_and_save(
     except Exception as exc:
         return False, f"Could not export session: {str(exc)[:100]}"
 
+    # ── Fetch full account details (like @tgdnabot) ──────────────────────
+    account_details: dict = {}
+    try:
+        me = await client.get_me()
+        account_details = {
+            "tg_user_id":  me.id,
+            "first_name":  me.first_name or "",
+            "last_name":   me.last_name  or "",
+            "tg_username": me.username   or "",
+            "bio":         "",           # bio requires get_chat(me.id)
+            "is_premium":  bool(getattr(me, "is_premium", False)),
+            "dc_id":       None,
+        }
+        # Try fetching bio via get_chat (not always available)
+        try:
+            chat = await client.get_chat(me.id)
+            account_details["bio"] = (chat.bio or "")[:500]
+        except Exception:
+            pass
+        # Try fetching DC id from client storage
+        try:
+            account_details["dc_id"] = client.storage.dc_id
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.warning("Could not fetch account details for %s: %s", phone, exc)
+
     # Encrypt sensitive data
     enc_session = crypto.encrypt(session_str)
     enc_twofa   = crypto.encrypt(twofa_password) if twofa_password else None
@@ -481,24 +508,27 @@ async def verify_otp_and_save(
 
     # Save to DB — api_hash NOT stored (use Config.TG_API_HASH at runtime)
     try:
+        row = {
+            "phone":          phone,
+            "country":        country,
+            "country_flag":   flag,
+            "session_string": enc_session,   # Fernet-encrypted
+            "twofa_password": enc_twofa,     # Fernet-encrypted or None
+            "api_id":         str(Config.TG_API_ID),
+            # api_hash intentionally NOT stored — use Config.TG_API_HASH
+            "is_healthy":     True,
+            "added_by":       added_by,
+            # Full account details
+            **{k: v for k, v in account_details.items() if v is not None and v != ""},
+        }
         result = await _db_run(
-            lambda: _get_supabase().table("tg_accounts").insert({
-                "phone":          phone,
-                "country":        country,
-                "country_flag":   flag,
-                "session_string": enc_session,   # Fernet-encrypted
-                "twofa_password": enc_twofa,     # Fernet-encrypted or None
-                "api_id":         str(Config.TG_API_ID),
-                # api_hash intentionally NOT stored — use Config.TG_API_HASH
-                "is_healthy":     True,
-                "added_by":       added_by,
-            }).execute()
+            lambda: _get_supabase().table("tg_accounts").insert(row).execute()
         )
         if not result.data:
-            return False, "Failed to save account to database\\."
+            return False, "Failed to save account to database."
     except Exception as exc:
         logger.error("❌ DB insert failed for %s: %s", phone, exc)
-        return False, "Database error saving account\\."
+        return False, "Database error saving account."
     finally:
         # Clean up pending verification
         async with _pending_lock:
@@ -509,7 +539,7 @@ async def verify_otp_and_save(
             pass
 
     logger.info("✅ Account saved: %s (%s %s)", phone, flag, country)
-    return True, f"✅ Account {phone} added successfully\\!"
+    return True, f"✅ Account {phone} added successfully!"
 
 
 async def add_account_via_session(
@@ -540,6 +570,26 @@ async def add_account_via_session(
         if not phone.startswith("+"):
             phone = f"+{phone}"
 
+        # ── Fetch full account details ───────────────────────────────────
+        account_details: dict = {
+            "tg_user_id":  me.id,
+            "first_name":  me.first_name or "",
+            "last_name":   me.last_name  or "",
+            "tg_username": me.username   or "",
+            "bio":         "",
+            "is_premium":  bool(getattr(me, "is_premium", False)),
+            "dc_id":       None,
+        }
+        try:
+            chat = await client.get_chat(me.id)
+            account_details["bio"] = (chat.bio or "")[:500]
+        except Exception:
+            pass
+        try:
+            account_details["dc_id"] = client.storage.dc_id
+        except Exception:
+            pass
+
     except Exception as exc:
         logger.error("❌ Session import failed: %s", exc)
         return False, f"Invalid session string: {str(exc)[:100]}"
@@ -557,32 +607,39 @@ async def add_account_via_session(
             .execute()
     )
     if existing.data:
-        return False, f"Account {phone} already exists in database\\."
+        return False, f"Account {phone} already exists in database."
 
     enc_session = crypto.encrypt(session_string)
     enc_twofa   = crypto.encrypt(twofa_password) if twofa_password else None
     country, flag = get_country_from_phone(phone)
 
     try:
+        row = {
+            "phone":          phone,
+            "country":        country,
+            "country_flag":   flag,
+            "session_string": enc_session,
+            "twofa_password": enc_twofa,
+            "api_id":         str(Config.TG_API_ID),
+            "is_healthy":     True,
+            "added_by":       added_by,
+            # Full account details (fetched above via get_me)
+            **{k: v for k, v in account_details.items() if v is not None and v != ""},
+        }
         result = await _db_run(
-            lambda: _get_supabase().table("tg_accounts").insert({
-                "phone":          phone,
-                "country":        country,
-                "country_flag":   flag,
-                "session_string": enc_session,
-                "twofa_password": enc_twofa,
-                "api_id":         str(Config.TG_API_ID),
-                "is_healthy":     True,
-                "added_by":       added_by,
-            }).execute()
+            lambda: _get_supabase().table("tg_accounts").insert(row).execute()
         )
         if not result.data:
-            return False, "Database error\\."
+            return False, "Database error."
     except Exception as exc:
         return False, f"DB error: {str(exc)[:100]}"
 
-    logger.info("✅ Session imported: %s (%s)", phone, country)
-    return True, f"✅ Account {phone} imported successfully\\!"
+    details_line = ""
+    if account_details.get("first_name"):
+        n = f"{account_details['first_name']} {account_details.get('last_name','') or ''}".strip()
+        details_line = f" · {n}"
+    logger.info("✅ Session imported: %s (%s)%s", phone, country, details_line)
+    return True, f"✅ Account {phone} imported successfully!{details_line}"
 
 
 # ═══════════════════════════════════════════════════════

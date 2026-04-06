@@ -53,22 +53,28 @@ from db import (
     reserve_stock,
     add_to_wishlist, remove_from_wishlist, get_wishlist, is_in_wishlist,
     create_payment, update_payment_screenshot, get_payment,
+    approve_payment, reject_payment,
     get_promo_code, use_promo_code,
     create_order, get_user_orders, get_order, get_user_order_count,
     get_user_by_referral_code, record_referral_earning, get_referral_stats,
     create_refund_request,
+    # TG Accounts — OTP delivery
+    get_tg_account_by_phone, get_tg_account_by_id,
+    get_available_tg_account, mark_tg_account_sold,
+    get_tg_account_for_order,
     supabase,
 )
 from payments import (
     generate_upi_qr,
     validate_payment_amount,
     normalise_inr,
-    hash_screenshot,
     msg_payment_instructions,
     msg_request_screenshot,
     msg_payment_submitted,
+    msg_admin_new_payment,
 )
 from utils import (
+    md_username,
     rate_limiter,
     calculate_referral_commission,
     calculate_discount,
@@ -192,7 +198,7 @@ async def _get_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optio
         reason = escape_md(user.get("ban_reason") or "No reason provided")
         await _send(
             update,
-            f"🚫 *ACCOUNT RESTRICTED*\n\nReason: {reason}\n\nContact @{Config.SUPPORT_USERNAME} to appeal.",
+            f"🚫 *ACCOUNT RESTRICTED*\n\nReason: {reason}\n\nContact {md_username(Config.SUPPORT_USERNAME)} to appeal.",
         )
         return None
 
@@ -205,26 +211,26 @@ async def _get_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optio
 
 def _kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛒 Store",      callback_data="store"),
-         InlineKeyboardButton("💰 Add Funds",  callback_data="add_funds")],
-        [InlineKeyboardButton("👤 Profile",    callback_data="profile"),
-         InlineKeyboardButton("🎁 Referral",   callback_data="referral")],
-        [InlineKeyboardButton("⭐ Wishlist",   callback_data="wishlist"),
-         InlineKeyboardButton("📋 Orders",     callback_data="orders")],
-        [InlineKeyboardButton("❓ Help",        callback_data="help"),
-         InlineKeyboardButton("🛠️ Support",    url=f"https://t.me/{Config.SUPPORT_USERNAME}")],
+        [InlineKeyboardButton("🛒  Browse Store",      callback_data="store"),
+         InlineKeyboardButton("💰  Add Funds",         callback_data="add_funds")],
+        [InlineKeyboardButton("👤  My Profile",        callback_data="profile"),
+         InlineKeyboardButton("🎁  Referral Program",  callback_data="referral")],
+        [InlineKeyboardButton("⭐  My Wishlist",       callback_data="wishlist"),
+         InlineKeyboardButton("📋  Order History",     callback_data="orders")],
+        [InlineKeyboardButton("❓  Help & FAQ",         callback_data="help"),
+         InlineKeyboardButton("🛠️  Live Support",      url=f"https://t.me/{Config.SUPPORT_USERNAME}")],
     ])
 
 
 def _kb_back_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("◀️ Main Menu", callback_data="main_menu")
+        InlineKeyboardButton("🏠  Back to Main Menu", callback_data="main_menu")
     ]])
 
 
 def _kb_categories(categories: List[str]) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(f"📦 {c}", callback_data=f"cat:{c}")] for c in categories]
-    rows.append([InlineKeyboardButton("◀️ Back", callback_data="main_menu")])
+    rows = [[InlineKeyboardButton(f"📦  {c}", callback_data=f"cat:{c}")] for c in categories]
+    rows.append([InlineKeyboardButton("🏠  Back to Main Menu", callback_data="main_menu")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -240,14 +246,14 @@ def _kb_products(products: List[Dict], category: str) -> InlineKeyboardMarkup:
 
 def _kb_product_detail(product_id: int, in_wishlist: bool) -> InlineKeyboardMarkup:
     wish_btn = (
-        InlineKeyboardButton("💔 Remove Wishlist", callback_data=f"unwish:{product_id}")
+        InlineKeyboardButton("💔  Remove from Wishlist", callback_data=f"unwish:{product_id}")
         if in_wishlist else
-        InlineKeyboardButton("⭐ Add Wishlist",    callback_data=f"wish:{product_id}")
+        InlineKeyboardButton("⭐  Save to Wishlist",     callback_data=f"wish:{product_id}")
     )
     return InlineKeyboardMarkup([
         [wish_btn],
-        [InlineKeyboardButton("🛒 Buy Now", callback_data=f"buy:{product_id}")],
-        [InlineKeyboardButton("◀️ Back",    callback_data="store")],
+        [InlineKeyboardButton("🛒  Buy Now — Instant Delivery", callback_data=f"buy:{product_id}")],
+        [InlineKeyboardButton("◀️  Back to Categories",          callback_data="store")],
     ])
 
 
@@ -266,22 +272,22 @@ def _kb_quantity(product_id: int, max_qty: int) -> InlineKeyboardMarkup:
 
 def _kb_purchase_summary(product_id: int, quantity: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Confirm Purchase",  callback_data=f"confirm:{product_id}:{quantity}")],
-        [InlineKeyboardButton("🎟️ Use Promo Code",  callback_data=f"promo_prompt:{product_id}:{quantity}")],
-        [InlineKeyboardButton("❌ Cancel",            callback_data=f"prod:{product_id}")],
+        [InlineKeyboardButton("✅  Confirm & Pay Now",       callback_data=f"confirm:{product_id}:{quantity}")],
+        [InlineKeyboardButton("🎟️  Apply Promo Code",       callback_data=f"promo_prompt:{product_id}:{quantity}")],
+        [InlineKeyboardButton("❌  Cancel Order",             callback_data=f"prod:{product_id}")],
     ])
 
 
 def _kb_payment(payment_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ I've Paid",  callback_data=f"paid:{payment_id}")],
-        [InlineKeyboardButton("❌ Cancel",     callback_data="cancel_payment")],
+        [InlineKeyboardButton("✅  I've Paid — Submit Screenshot", callback_data=f"paid:{payment_id}")],
+        [InlineKeyboardButton("❌  Cancel This Payment",            callback_data="cancel_payment")],
     ])
 
 
 def _kb_cancel_payment() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("❌ Cancel Payment", callback_data="cancel_payment")
+        InlineKeyboardButton("❌  Cancel Payment", callback_data="cancel_payment")
     ]])
 
 
@@ -315,7 +321,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user.get("is_banned"):
         reason = escape_md(user.get("ban_reason") or "No reason provided")
         await update.effective_message.reply_text(
-            f"🚫 *ACCOUNT RESTRICTED*\n\nReason: {reason}\n\nContact @{Config.SUPPORT_USERNAME} to appeal.",
+            f"🚫 *ACCOUNT RESTRICTED*\n\nReason: {reason}\n\nContact {md_username(Config.SUPPORT_USERNAME)} to appeal.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -330,13 +336,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _show_tos(update: Update) -> None:
     """Show ToS — works from both message and callback."""
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ I Accept",  callback_data="tos:accept")],
-        [InlineKeyboardButton("❌ Decline",   callback_data="tos:decline")],
+        [InlineKeyboardButton("🟢  Yes, I Accept the Terms", callback_data="tos:accept")],
+        [InlineKeyboardButton("🔴  No, I Decline",           callback_data="tos:decline")],
     ])
     text = (
-        f"📋 *TERMS OF SERVICE*\n\n"
-        f"{Config.TOS_TEXT}\n\n"
-        "You must accept to use this bot."
+        f"📜 *TERMS OF SERVICE*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{escape_md(Config.TOS_TEXT)}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ *Please read carefully before proceeding.*\n\n"
+        f"By tapping *Accept* you confirm that you have read, "
+        f"understood, and agreed to all the terms above. "
+        f"Access to this bot is strictly conditional on your acceptance."
     )
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -369,26 +380,42 @@ async def handle_tos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # The user is checked for tos_accepted on every /start — they'll always see ToS
         # No need to ban; they're stuck here until they accept.
         await query.edit_message_text(
-            "❌ *Terms Declined*\n\n"
-            "You must accept the Terms of Service to use this bot.\n\n"
-            "Send /start to try again.",
+            "🔴 *Terms of Service Declined*\n\n"
+            "You have chosen not to accept our Terms of Service.\n\n"
+            "Unfortunately, access to this bot requires your agreement "
+            "to the terms outlined above. Without acceptance, we are unable "
+            "to create your account or process any transactions.\n\n"
+            "If you change your mind, simply send /start and you will be "
+            "shown the terms again. We hope to see you soon! 🙏",
             parse_mode=ParseMode.MARKDOWN,
         )
 
 
 async def _show_main_menu(update: Update, user: Dict) -> None:
-    """Render main menu with profile card."""
+    """Render main menu with rich profile card."""
     name    = escape_md(str(user.get("name", "User")))
     balance = float(user.get("balance", 0))
     rank    = user.get("rank", "Bronze")
     rank_emoji = {"Bronze":"🥉","Silver":"🥈","Gold":"🥇","VIP":"💎"}.get(rank,"🏅")
 
+    rank_msg = {
+        "Bronze": "Keep shopping to level up to Silver! 🚀",
+        "Silver": "You're doing great — Gold is within reach! 💪",
+        "Gold":   "Almost at the top — VIP status awaits! 🏆",
+        "VIP":    "You've reached the highest tier. Thank you! 💎",
+    }.get(rank, "Welcome aboard!")
+
     text = (
-        f"👋 *Welcome to {escape_md(Config.SHOP_NAME)}!*\n\n"
-        f"👤 {name}\n"
-        f"💰 Balance: {format_currency(balance)}\n"
-        f"{rank_emoji} Rank: {rank}\n\n"
-        "Select an option:"
+        f"👋 *Welcome back, {name}!*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"_\"Your trusted source for instant digital delivery.\"_\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 *Account:* {name}\n"
+        f"💰 *Balance:* {format_currency(balance)}\n"
+        f"{rank_emoji} *Rank:* {rank}\n"
+        f"💬 _{rank_msg}_\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"What would you like to do today?"
     )
     await _send(update, text, _kb_main())
 
@@ -418,12 +445,21 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     order_count = await get_user_order_count(user["user_id"])
 
     card = format_profile_card(user)
-    text = f"{card}\n📦 Orders: {order_count}"
+    balance = float(user.get("balance", 0))
+    rank    = user.get("rank", "Bronze")
+    next_rank = {"Bronze": "Silver", "Silver": "Gold", "Gold": "VIP", "VIP": None}.get(rank)
+    next_note = f"\n💡 _Spend more to reach *{next_rank}* status!_" if next_rank else "\n🏆 _You have reached the highest rank!_"
 
+    text = (
+        f"{card}\n"
+        f"📦 *Total Orders:* {order_count}"
+        f"{next_note}\n\n"
+        f"_Use the buttons below to explore your history or invite friends._"
+    )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Order History", callback_data="orders"),
-         InlineKeyboardButton("🎁 Referral",      callback_data="referral")],
-        [InlineKeyboardButton("◀️ Main Menu",     callback_data="main_menu")],
+        [InlineKeyboardButton("📋  Order History",      callback_data="orders"),
+         InlineKeyboardButton("🎁  Referral Program",   callback_data="referral")],
+        [InlineKeyboardButton("🏠  Back to Main Menu",  callback_data="main_menu")],
     ])
     await _send(update, text, keyboard)
 
@@ -441,11 +477,19 @@ async def show_store(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     categories = await get_categories()
     if not categories:
         await _send(update,
-            "🛒 *STORE*\n\nNo products available right now\\. Check back soon\\!",
+            "🛒 *STORE*\n\n"
+            "We are restocking right now — new products are on their way!\n\n"
+            "Please check back shortly or contact support if you need urgent assistance.",
             _kb_back_main())
         return
 
-    await _send(update, "🛒 *BROWSE STORE*\n\nSelect a category:", _kb_categories(categories))
+    await _send(update,
+        f"🛒 *BROWSE STORE*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔥 *{len(categories)} categor{'y' if len(categories)==1 else 'ies'} available*\n\n"
+        f"All products are delivered *instantly* after purchase.\n"
+        f"Select a category below to get started 👇",
+        _kb_categories(categories))
 
 
 async def show_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -487,13 +531,20 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     in_wl = await is_in_wishlist(user["user_id"], product_id)
     stock  = product.get("stock_count", 0)
 
-    desc = f"\n📝 {escape_md(product['description'])}" if product.get("description") else ""
-    stock_line = f"\n📊 Stock: {stock} available" if stock > 0 else "\n❌ *OUT OF STOCK*"
+    desc = f"\n📝 _{escape_md(product['description'])}_" if product.get("description") else ""
+    if stock > 0:
+        stock_line = f"\n📦 *In Stock:* {stock} unit{'s' if stock>1 else ''} available"
+        stock_note = "\n⚡ _Delivered instantly after purchase_"
+    else:
+        stock_line = "\n❌ *OUT OF STOCK*"
+        stock_note = "\n💡 _Save to wishlist to get notified when it's back_"
 
     text = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 *{escape_md(product['name'])}*\n"
-        f"💰 Price: {format_currency(float(product['selling_price']))}"
-        f"{desc}{stock_line}"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 *Price:* {format_currency(float(product['selling_price']))}"
+        f"{desc}{stock_line}{stock_note}"
     )
     await _send(update, text, _kb_product_detail(product_id, in_wl))
 
@@ -537,12 +588,18 @@ async def show_wishlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not wishlist:
         await _send(update,
-            "⭐ *YOUR WISHLIST*\n\nYour wishlist is empty\\. Browse the store to save products\\!",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Browse", callback_data="store"),
-                                   InlineKeyboardButton("◀️ Back", callback_data="main_menu")]]))
+            "⭐ *YOUR WISHLIST*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Your wishlist is empty right now.\n\n"
+            "Browse our store and tap *Save to Wishlist* on any product "
+            "to track it here. Never miss a restock! 🔔",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛒  Browse Store", callback_data="store")],
+                [InlineKeyboardButton("🏠  Main Menu",    callback_data="main_menu")],
+            ]))
         return
 
-    text  = "⭐ *YOUR WISHLIST*\n\n"
+    text  = "⭐ *YOUR WISHLIST*\n━━━━━━━━━━━━━━━━━━━━\n\n"
     rows  = []
     for item in wishlist:
         p = item.get("products") or {}
@@ -582,20 +639,26 @@ async def start_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     stock = product.get("stock_count", 0)
     if stock == 0:
         await _send(update,
-            f"❌ *OUT OF STOCK*\n\n{escape_md(product['name'])} is currently unavailable\\.",
-            InlineKeyboardMarkup([[
-                InlineKeyboardButton("⭐ Add to Wishlist", callback_data=f"wish:{product_id}"),
-                InlineKeyboardButton("◀️ Back",           callback_data="store"),
-            ]]))
+            f"❌ *OUT OF STOCK*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"*{escape_md(product['name'])}* is currently sold out.\n\n"
+            f"💡 Save it to your wishlist and we'll have it ready for you "
+            f"when stock is replenished. New stock is added regularly!",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("⭐  Save to Wishlist", callback_data=f"wish:{product_id}")],
+                [InlineKeyboardButton("◀️  Back to Store",    callback_data="store")],
+            ]))
         return
 
     context.user_data["buy"] = {"product_id": product_id, "promo": None, "discount": 0.0}
 
     await _send(update,
         f"🛒 *{escape_md(product['name'])}*\n"
-        f"💰 {format_currency(float(product['selling_price']))} each\n"
-        f"📊 {stock} available\n\n"
-        "Select quantity:",
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 *Price:* {format_currency(float(product['selling_price']))} per unit\n"
+        f"📦 *Available:* {stock} unit{'s' if stock>1 else ''}\n\n"
+        f"Select how many you would like to purchase 👇\n"
+        f"_All items are delivered instantly to this chat._",
         _kb_quantity(product_id, stock))
 
 
@@ -647,7 +710,7 @@ async def _show_purchase_summary(
         f"💵 Subtotal: {format_currency(subtotal)}\n"
     )
     if promo and discount > 0:
-        text += f"🎟️ Promo `{escape_md(promo)}`: \\-{format_currency(discount)}\n"
+        text += f"🎟️ Promo `{escape_md(promo)}`: -{format_currency(discount)}\n"
     text += (
         f"━━━━━━━━━━━━━━\n"
         f"✅ *Total: {format_currency(total)}*\n\n"
@@ -656,7 +719,7 @@ async def _show_purchase_summary(
 
     if balance < total:
         deficit = total - balance
-        text   += f"\n❌ *Insufficient balance*\nYou need {format_currency(deficit)} more\\."
+        text   += f"\n❌ *Insufficient balance*\nYou need {format_currency(deficit)} more."
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💰 Add Funds", callback_data="add_funds")],
             [InlineKeyboardButton("❌ Cancel",     callback_data=f"prod:{product['id']}")],
@@ -680,8 +743,13 @@ async def promo_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.user_data["awaiting_promo"] = {"product_id": product_id, "quantity": quantity}
 
     await _send(update,
-        "🎟️ *ENTER PROMO CODE*\n\nType your promo code and send it\\.\n\n/cancel to go back\\.",
-        InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"prod:{product_id}")]]))
+        "🎟️ *APPLY PROMO CODE*\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Type your promo code below and send it. "
+        "Codes are *not case-sensitive*.\n\n"
+        "💡 _Valid codes will automatically reduce your total at checkout._\n\n"
+        "Send /cancel to go back without applying a code.",
+        InlineKeyboardMarkup([[InlineKeyboardButton("❌  Cancel", callback_data=f"prod:{product_id}")]]))
 
 
 async def handle_promo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -701,7 +769,7 @@ async def handle_promo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     promo = await get_promo_code(code)
     if not promo:
         await update.message.reply_text(
-            "❌ *Invalid or expired promo code\\.* Try again or /cancel\\.",
+            "❌ *Invalid or expired promo code.* Try again or /cancel.",
             parse_mode=ParseMode.MARKDOWN,
         )
         context.user_data["awaiting_promo"] = promo_data   # restore so they can retry
@@ -709,13 +777,13 @@ async def handle_promo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     product = await get_product(product_id)
     if not product:
-        await update.message.reply_text("❌ Product not found\\. Please start over\\.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("❌ Product not found. Please start over.", parse_mode=ParseMode.MARKDOWN)
         return
 
     subtotal = float(product["selling_price"]) * quantity
     if subtotal < float(promo.get("min_purchase", 0)):
         await update.message.reply_text(
-            f"❌ This promo requires a minimum purchase of {format_currency(float(promo['min_purchase']))}\\.",
+            f"❌ This promo requires a minimum purchase of {format_currency(float(promo['min_purchase']))}.",
             parse_mode=ParseMode.MARKDOWN,
         )
         context.user_data["awaiting_promo"] = promo_data
@@ -727,7 +795,7 @@ async def handle_promo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data["buy"] = buy
 
     await update.message.reply_text(
-        f"✅ *Promo applied\\!* Discount: \\-{format_currency(discount)}",
+        f"✅ *Promo applied!* Discount: -{format_currency(discount)}",
         parse_mode=ParseMode.MARKDOWN,
     )
     await _show_purchase_summary_msg(update, context, user, product, quantity)
@@ -756,12 +824,12 @@ async def _show_purchase_summary_msg(
         f"💵 Subtotal: {format_currency(subtotal)}\n"
     )
     if promo and discount > 0:
-        text += f"🎟️ Promo `{escape_md(promo)}`: \\-{format_currency(discount)}\n"
+        text += f"🎟️ Promo `{escape_md(promo)}`: -{format_currency(discount)}\n"
     text += f"━━━━━━━━━━━━━━\n✅ *Total: {format_currency(total)}*\n\n💰 Balance: {format_currency(balance)}"
 
     if balance < total:
         deficit = total - balance
-        text   += f"\n\n❌ Need {format_currency(deficit)} more\\."
+        text   += f"\n\n❌ Need {format_currency(deficit)} more."
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💰 Add Funds", callback_data="add_funds")],
         ])
@@ -798,20 +866,30 @@ async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     product = await get_product(product_id)
     if not product:
-        await _send(update, "❌ Product no longer available\\.")
+        await _send(update, "❌ Product no longer available.")
         return
 
     unit_price = float(product["selling_price"])
     total      = max(unit_price * quantity - discount, 0)
 
-    await _send(update, "⏳ *Processing your purchase\\.\\.\\.*")
+    await _send(update,
+        "⏳ *Processing your purchase...*\n\n"
+        "_Please wait — we are securing your items and deducting your balance. "
+        "Do not press anything._")
 
     # ── Step 1: Deduct balance atomically ──────────────────────────
     deducted = await deduct_balance(user["user_id"], total)
     if not deducted:
         await _send(update,
-            "❌ *Insufficient balance*\n\nPlease add funds and try again\\.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("💰 Add Funds", callback_data="add_funds")]]))
+            "❌ *Insufficient Balance*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "You don't have enough balance to complete this purchase.\n\n"
+            "Top up your wallet via UPI and come right back — "
+            "your cart will be waiting! 💳",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("💰  Top Up Balance Now", callback_data="add_funds")],
+                [InlineKeyboardButton("🏠  Back to Main Menu",  callback_data="main_menu")],
+            ]))
         return
 
     # ── Step 2: Reserve stock atomically ───────────────────────────
@@ -820,7 +898,11 @@ async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Balance deducted but no stock — refund immediately
         await update_balance(user["user_id"], total)
         await _send(update,
-            "❌ *Out of stock*\n\nYour balance has been refunded\\. Please try again later\\.",
+            "❌ *Stock Just Ran Out*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Someone else purchased the last unit just before you — your balance "
+            "has been *fully refunded* instantly.\n\n"
+            "💡 Save this product to your wishlist to be first in line when it restocks!",
             _kb_back_main())
         return
 
@@ -850,8 +932,8 @@ async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             user["user_id"], product_id, stock_ids_str
         )
         await _send(update,
-            "❌ *Order failed*\n\nYour balance has been refunded\\.\n"
-            f"Please contact @{Config.SUPPORT_USERNAME} with reference: `PROD-{product_id}`",
+            "❌ *Order failed*\n\nYour balance has been refunded.\n"
+            f"Please contact {md_username(Config.SUPPORT_USERNAME)} with reference: `PROD-{product_id}`",
             _kb_back_main())
         return
 
@@ -878,7 +960,7 @@ async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 try:
                     await context.bot.send_message(
                         chat_id    = user["referred_by"],
-                        text       = f"🎁 *Referral Earning\\!*\n\nYou earned {format_currency(commission)} from a referral\\!",
+                        text       = f"🎁 *Referral Earning!*\n\nYou earned {format_currency(commission)} from a referral!",
                         parse_mode = ParseMode.MARKDOWN,
                     )
                 except Exception:
@@ -891,57 +973,306 @@ async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data.pop("buy", None)
 
 
-async def _deliver_items(
-    context: ContextTypes.DEFAULT_TYPE,
-    user_id: int,
-    product: Dict,
-    stock_items: List[Dict],
-    order_id: int,
+def _extract_phone(text: str) -> Optional[str]:
+    """
+    Extract a phone number from a stock item string.
+    Handles formats:
+      "+917012345678"
+      "+91 7012345678"
+      "+917012345678 | India"
+      "+917012345678 | 2FA: mypassword"
+    Returns normalised "+..." string or None.
+    """
+    import re
+    m = re.match(r"^\+?(\d[\d\s\-]{6,14})", text.strip())
+    if m:
+        digits = re.sub(r"[\s\-]", "", m.group(0))
+        if not digits.startswith("+"):
+            digits = f"+{digits}"
+        return digits
+    return None
+
+
+async def _deliver_otp_account(
+    context:     ContextTypes.DEFAULT_TYPE,
+    user_id:     int,
+    account:     Dict[str, Any],
+    order_id:    int,
+    item_index:  int,
+    total_items: int,
 ) -> None:
-    """Deliver purchased items to user's DM."""
+    """
+    Deliver a single OTP account to a buyer.
+    Shows: phone number, 2FA password (if set), and a live "Get OTP" button.
+    The Get OTP button calls the userbot to fetch the latest code from 777000.
+    """
+    from utils import crypto
+
+    phone      = account.get("phone", "")
+    account_id = account["id"]
+
+    # Decrypt 2FA password for display (buyers need it to log in)
+    enc_2fa    = account.get("twofa_password") or ""
+    twofa_text = crypto.decrypt(enc_2fa) if enc_2fa else None
+
+    country    = account.get("country", "Unknown")
+    flag       = account.get("country_flag", "🌍")
+    fname      = account.get("first_name") or ""
+    lname      = account.get("last_name")  or ""
+    full_name  = f"{fname} {lname}".strip() or "—"
+    is_premium = account.get("is_premium", False)
+    dc_id      = account.get("dc_id")
+
+    header = f"📱 *Item {item_index} of {total_items} — OTP Account*"
+
+    details = (
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📞 *Phone:* `{escape_md(phone)}`\n"
+        f"🌍 *Country:* {flag} {escape_md(country)}\n"
+        f"👤 *Name:* {escape_md(full_name)}\n"
+    )
+    if is_premium:
+        details += "💎 *Telegram Premium:* Yes\n"
+    if dc_id:
+        details += f"🏢 *DC:* {dc_id}\n"
+    if twofa_text:
+        details += f"\n🔐 *2FA Password:* `{escape_md(twofa_text)}`\n"
+    else:
+        details += "\n🔓 *2FA:* Not set\n"
+
+    details += (
+        f"\n━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 _Save these details somewhere safe._\n"
+        f"📲 _Tap *Get OTP* to receive the login code instantly._"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔐  Get OTP Code",
+            callback_data=f"get_otp:{account_id}:{order_id}"
+        )],
+        [InlineKeyboardButton(
+            "🔄  Refresh OTP",
+            callback_data=f"get_otp:{account_id}:{order_id}"
+        )],
+    ])
+
+    await context.bot.send_message(
+        chat_id      = user_id,
+        text         = f"{header}\n{details}",
+        parse_mode   = ParseMode.MARKDOWN,
+        reply_markup = kb,
+    )
+
+
+async def _deliver_items(
+    context:     ContextTypes.DEFAULT_TYPE,
+    user_id:     int,
+    product:     Dict,
+    stock_items: List[Dict],
+    order_id:    int,
+) -> None:
+    """
+    Deliver purchased items to user's DM.
+
+    Delivery modes:
+    • papers   → sends main_file_id as a document
+    • otp      → looks up phone in tg_accounts → shows phone + 2FA + Get OTP button
+                  (falls back to plain text if no session found)
+    • default  → sends each stock item as a code-formatted text message
+    """
     category = (product.get("category") or "").lower()
 
     try:
         if category == "papers":
-            # Deliver main file
             if product.get("main_file_id"):
                 await context.bot.send_document(
-                    chat_id  = user_id,
-                    document = product["main_file_id"],
-                    caption  = f"📄 *{escape_md(product['name'])}*\n\nOrder #{order_id}",
+                    chat_id    = user_id,
+                    document   = product["main_file_id"],
+                    caption    = f"📄 *{escape_md(product['name'])}*\n\nOrder #{order_id}",
                     parse_mode = ParseMode.MARKDOWN,
                 )
             else:
                 await context.bot.send_message(
                     chat_id    = user_id,
-                    text       = f"❌ File unavailable\\. Contact @{Config.SUPPORT_USERNAME} with Order #{order_id}",
+                    text       = (
+                        f"❌ *Delivery Error*\n\n"
+                        f"We could not attach your file for Order *#{order_id}*.\n\n"
+                        f"Please contact our support team *immediately* and quote your "
+                        f"order number — we will resolve this for you right away.\n\n"
+                        f"📩 Support: {md_username(Config.SUPPORT_USERNAME)}"
+                    ),
                     parse_mode = ParseMode.MARKDOWN,
                 )
 
+        elif category == "otp":
+            for idx, item in enumerate(stock_items, 1):
+                item_text = item.get("item", "").strip()
+
+                # Attempt OTP-mode delivery: look up phone in tg_accounts
+                phone   = _extract_phone(item_text)
+                account = None
+
+                if phone:
+                    account = await get_tg_account_by_phone(phone)
+                    # Only use the account if it hasn't already been sold
+                    # (double-sell guard — mark_tg_account_sold uses optimistic lock)
+                    if account and account.get("is_sold") and account.get("order_id") != order_id:
+                        account = None   # already consumed by another order
+
+                if account:
+                    # ── OTP mode ──────────────────────────────────────────
+                    await _deliver_otp_account(context, user_id, account, order_id, idx, len(stock_items))
+                    # Mark sold (optimistic lock prevents double-sell)
+                    sold = await mark_tg_account_sold(account["id"], order_id, user_id)
+                    if not sold:
+                        logger.error(
+                            "OTP account %d double-sell prevented for order %d",
+                            account["id"], order_id,
+                        )
+                else:
+                    # ── Fallback: plain text (no session found) ───────────
+                    logger.warning(
+                        "OTP account not found for phone %s (order %d) — falling back to text delivery",
+                        phone, order_id,
+                    )
+                    await context.bot.send_message(
+                        chat_id    = user_id,
+                        text       = (
+                            f"📦 *Item {idx} of {len(stock_items)}*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                            f"`{escape_md(item_text)}`\n\n"
+                            f"_Copy the text above carefully._\n\n"
+                            f"⚠️ _No live OTP available for this item. "
+                            f"Contact {md_username(Config.SUPPORT_USERNAME)} if you need assistance._"
+                        ),
+                        parse_mode = ParseMode.MARKDOWN,
+                    )
+
         else:
-            # Deliver each stock item as a separate message
+            # ── Default: deliver each item as code text ───────────────────
             for idx, item in enumerate(stock_items, 1):
                 item_text = item.get("item", "")
                 await context.bot.send_message(
                     chat_id    = user_id,
-                    text       = f"📦 *Item {idx}/{len(stock_items)}*\n\n`{escape_md(item_text)}`",
+                    text       = (
+                        f"📦 *Item {idx} of {len(stock_items)}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"`{escape_md(item_text)}`\n\n"
+                        f"_Copy the text above carefully._"
+                    ),
                     parse_mode = ParseMode.MARKDOWN,
                 )
 
-        # Confirmation + refund button
+        # ── Confirmation message (all categories) ─────────────────────────
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 View Orders", callback_data="orders")],
-            [InlineKeyboardButton("🔄 Request Refund", callback_data=f"refund:{order_id}")],
+            [InlineKeyboardButton("📋  View Orders",    callback_data="orders")],
+            [InlineKeyboardButton("🔄  Request Refund", callback_data=f"refund:{order_id}")],
         ])
         await context.bot.send_message(
             chat_id    = user_id,
-            text       = f"✅ *Purchase Complete\\!*\n\nOrder #{order_id} delivered\\.\nIf you have issues, tap Refund below\\.",
-            parse_mode = ParseMode.MARKDOWN,
+            text       = (
+                f"✅ *Purchase Complete!*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🎉 Order *#{order_id}* has been delivered above.\n\n"
+                f"📌 *Save your items* — we cannot resend delivered content.\n\n"
+                f"❓ Something not working? Tap *Request Refund* within 24 hours."
+            ),
+            parse_mode   = ParseMode.MARKDOWN,
             reply_markup = keyboard,
         )
 
     except Exception as exc:
         logger.error("Delivery failed for order %d user %d: %s", order_id, user_id, exc)
+
+
+# ═══════════════════════════════════════════════════════
+#  Live OTP fetch  (Get OTP button handler)
+# ═══════════════════════════════════════════════════════
+
+async def handle_get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Callback: buyer taps "Get OTP" / "Refresh OTP".
+    callback_data = "get_otp:{account_id}:{order_id}"
+
+    Fetches the latest OTP from Telegram's service account (777000)
+    via the stored Pyrogram session, then sends it to the buyer.
+    Rate-limited to one fetch per 30 seconds per account.
+    """
+    await _answer(update, "Fetching OTP…")
+
+    user = await _get_user(update, context)
+    if not user:
+        return
+
+    parts      = update.callback_query.data.split(":")
+    account_id = int(parts[1])
+    order_id   = int(parts[2])
+
+    # ── Rate limit: 1 fetch per 30 seconds per account ────────────────
+    if not _rate_ok(user["user_id"], f"get_otp:{account_id}", 30):
+        await _answer(update,
+            "⏱️ Please wait 30 seconds between OTP fetches.\n"
+            "The code takes a moment to arrive — try again shortly.",
+            alert=True)
+        return
+
+    # ── Verify the order belongs to this user ─────────────────────────
+    order = await get_order(order_id)
+    if not order or order.get("user_id") != user["user_id"]:
+        await _answer(update, "❌ Order not found.", alert=True)
+        return
+
+    # ── Fetch account ─────────────────────────────────────────────────
+    account = await get_tg_account_by_id(account_id)
+    if not account:
+        await _answer(update, "❌ Account not found.", alert=True)
+        return
+
+    phone     = account.get("phone", "")
+    enc_sess  = account.get("session_string", "")
+
+    if not enc_sess:
+        await _answer(update, "❌ No session stored for this account.", alert=True)
+        return
+
+    # ── Call userbot OTP fetcher ───────────────────────────────────────
+    try:
+        from userbot import get_otp_for_order
+        otp = await get_otp_for_order(phone, enc_sess)
+    except Exception as exc:
+        logger.error("OTP fetch failed for account %d: %s", account_id, exc)
+        await _answer(update, "❌ OTP service error. Try again in a moment.", alert=True)
+        return
+
+    if not otp:
+        await _answer(update,
+            "⏳ No OTP received yet.\n\n"
+            "Make sure you requested a login code on Telegram, "
+            "then tap Refresh OTP in about 10–15 seconds.",
+            alert=True)
+        return
+
+    # ── Send OTP to buyer ─────────────────────────────────────────────
+    await context.bot.send_message(
+        chat_id    = user["user_id"],
+        text       = (
+            f"🔐 *OTP CODE*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 Phone: `{escape_md(phone)}`\n\n"
+            f"🔑 *Code:* `{escape_md(otp)}`\n\n"
+            f"⚡ _Enter this code immediately — OTP codes expire in ~5 minutes._\n\n"
+            f"💡 _Tap *Refresh OTP* if you need a fresh code after requesting another._"
+        ),
+        parse_mode = ParseMode.MARKDOWN,
+        reply_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "🔄  Refresh OTP",
+                callback_data=f"get_otp:{account_id}:{order_id}"
+            ),
+        ]]),
+    )
+    logger.info("✅ OTP delivered to user %d for account %d (order %d)", user["user_id"], account_id, order_id)
 
 
 # ═══════════════════════════════════════════════════════
@@ -955,11 +1286,19 @@ async def add_funds_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
     await _send(update,
-        f"💰 *ADD FUNDS*\n\n"
-        f"Enter the amount in ₹ you want to deposit\\:\n\n"
-        f"Min: {format_inr(Config.MIN_DEPOSIT_INR)}\n"
-        f"Max: {format_inr(Config.MAX_DEPOSIT_INR)}\n\n"
-        "Type the amount and send it, or /cancel to go back\\.")
+        f"💳 *ADD FUNDS TO WALLET*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Top up your account balance via *UPI* — payments are "
+        f"reviewed and credited within *5–30 minutes*.\n\n"
+        f"📏 *Deposit Limits:*\n"
+        f"• Minimum: *{format_inr(Config.MIN_DEPOSIT_INR)}*\n"
+        f"• Maximum: *{format_inr(Config.MAX_DEPOSIT_INR)}* per transaction\n\n"
+        f"💬 *How it works:*\n"
+        f"1. Type the amount below and send it\n"
+        f"2. Scan the QR code or pay to our UPI ID\n"
+        f"3. Send a clear screenshot of your payment\n"
+        f"4. Our team approves and credits your wallet\n\n"
+        f"Type your deposit amount in ₹ now, or /cancel to go back.")
     return ADD_FUNDS_AMOUNT
 
 
@@ -972,7 +1311,7 @@ async def add_funds_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         raw_amount = float(update.message.text.strip())
     except ValueError:
         await update.message.reply_text(
-            "❌ Please enter a valid number\\. Example: `500`",
+            "❌ Please enter a valid number. Example: `500`",
             parse_mode=ParseMode.MARKDOWN)
         return ADD_FUNDS_AMOUNT
 
@@ -986,7 +1325,7 @@ async def add_funds_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     payment_id  = await create_payment(user["user_id"], amount_inr, payment_ref)
 
     if not payment_id:
-        await update.message.reply_text("❌ Failed to create payment\\. Please try again\\.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("❌ Failed to create payment. Please try again.", parse_mode=ParseMode.MARKDOWN)
         return ConversationHandler.END
 
     context.user_data["pending_payment"] = payment_id
@@ -1041,18 +1380,10 @@ async def handle_payment_screenshot(update: Update, context: ContextTypes.DEFAUL
     elif msg.document:
         file_id = msg.document.file_id
     else:
-        await msg.reply_text("❌ Please send an *image* or *document*\\.", parse_mode=ParseMode.MARKDOWN)
+        await msg.reply_text("❌ Please send an *image* or *document*.", parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Download image and hash its actual bytes
-    image_bytes = await hash_screenshot(context.bot, file_id)
-    if image_bytes is None:
-        # Could not download — still accept but without duplicate detection
-        image_hash_bytes = b""
-    else:
-        image_hash_bytes = image_bytes  # already bytes from download
-
-    # Get image bytes for hashing
+    # Download image bytes for content-based duplicate detection
     try:
         tg_file = await context.bot.get_file(file_id)
         buf     = BytesIO()
@@ -1065,7 +1396,7 @@ async def handle_payment_screenshot(update: Update, context: ContextTypes.DEFAUL
     ok, err = await update_payment_screenshot(payment_id, file_id, actual_bytes)
     if not ok:
         await msg.reply_text(
-            f"❌ *{escape_md(err or 'Could not save screenshot.')}*\n\nPlease try a different screenshot\\.",
+            f"❌ *{escape_md(err or 'Could not save screenshot.')}*\n\nPlease try a different screenshot.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -1083,13 +1414,191 @@ async def handle_payment_screenshot(update: Update, context: ContextTypes.DEFAUL
     )
     logger.info("Screenshot submitted for payment %s", ref)
 
+    # ── Notify all admins with the screenshot + Approve/Reject buttons ──
+    # The approve/reject action is handled by the ADMIN BOT (separate token).
+    # We send via the shop bot so it lands in the admin's DM from this bot,
+    # but the callback data is prefixed "admin_pay:" so the admin bot router
+    # picks it up.  Admins must have started the admin bot to receive callbacks.
+    if payment:
+        admin_text = msg_admin_new_payment(payment)
+        payment_db_id = payment.get("id", payment_id)
+        admin_kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ APPROVE", callback_data=f"pay:approve:{payment_db_id}"),
+                InlineKeyboardButton("❌ REJECT",  callback_data=f"pay:reject:{payment_db_id}"),
+            ]
+        ])
+        notified = set()
+        for admin_id in list(Config.OWNER_IDS) + list(Config.ADMIN_IDS):
+            if admin_id in notified:
+                continue
+            notified.add(admin_id)
+            try:
+                await context.bot.send_photo(
+                    chat_id      = admin_id,
+                    photo        = file_id,
+                    caption      = admin_text,
+                    parse_mode   = ParseMode.MARKDOWN,
+                    reply_markup = admin_kb,
+                )
+            except Exception as exc:
+                logger.warning("Could not notify admin %d about payment %s: %s", admin_id, ref, exc)
+
+
+async def admin_approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle pay:approve:{id} callback that arrives at the shop_bot.
+
+    The shop_bot sends the admin notification photo, so approve/reject
+    callbacks come back HERE, not to the admin_bot.  We handle the full
+    approve flow — DB update + user notification — directly.
+    """
+    query   = update.callback_query
+    user_id = query.from_user.id if query.from_user else None
+
+    if not user_id or not Config.is_admin(user_id):
+        await query.answer("⛔ Unauthorized.", show_alert=True)
+        return
+
+    await query.answer("Processing…")
+    payment_id = int(query.data.split(":")[2])
+
+    ok, err = await approve_payment(payment_id, user_id)
+    payment = await get_payment(payment_id)
+    ref     = payment["payment_ref"] if payment else f"#{payment_id}"
+
+    result_text = (
+        f"✅ *Payment {escape_md(ref)} APPROVED\\!*\n\nBalance credited to user."
+        if ok else
+        f"❌ *Approval failed:* {escape_md(err or 'Unknown error')}"
+    )
+
+    # Edit the notification photo caption
+    try:
+        await query.edit_message_caption(
+            caption    = result_text,
+            parse_mode = ParseMode.MARKDOWN,
+        )
+    except BadRequest:
+        try:
+            await query.edit_message_text(
+                text       = result_text,
+                parse_mode = ParseMode.MARKDOWN,
+            )
+        except BadRequest:
+            pass
+
+    # Notify the user (shop_bot is already the right bot for this)
+    if ok and payment:
+        try:
+            amount_usd = Config.inr_to_usd(payment["amount_inr"])
+            await context.bot.send_message(
+                chat_id    = payment["user_id"],
+                text       = (
+                    f"✅ *PAYMENT APPROVED\\!*\n\n"
+                    f"{format_inr(payment['amount_inr'])} (${amount_usd:.2f}) "
+                    f"has been added to your balance\\.\n\n"
+                    f"🛒 Tap *Browse Store* to start shopping\\!"
+                ),
+                parse_mode = ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            logger.warning("Could not notify user %d of approval: %s", payment.get("user_id"), exc)
+
+    logger.info("Admin %d %s payment %d via shop_bot notification", user_id, "approved" if ok else "FAILED to approve", payment_id)
+
+
+async def admin_start_reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle pay:reject:{id} callback that arrives at the shop_bot.
+
+    Stores the payment_id and asks the admin for a rejection reason.
+    The reason is collected by admin_handle_reject_reason() below,
+    which is triggered from route_text when awaiting_reject_payment is set.
+    """
+    query   = update.callback_query
+    user_id = query.from_user.id if query.from_user else None
+
+    if not user_id or not Config.is_admin(user_id):
+        await query.answer("⛔ Unauthorized.", show_alert=True)
+        return
+
+    await query.answer()
+    payment_id = int(query.data.split(":")[2])
+    context.user_data["awaiting_reject_payment"] = payment_id
+
+    prompt = (
+        "❌ *REJECT PAYMENT*\n\n"
+        "Send the rejection reason as a message, or send /skip for no reason:"
+    )
+    try:
+        await query.edit_message_caption(
+            caption    = prompt,
+            parse_mode = ParseMode.MARKDOWN,
+        )
+    except BadRequest:
+        try:
+            await query.edit_message_text(
+                text       = prompt,
+                parse_mode = ParseMode.MARKDOWN,
+            )
+        except BadRequest:
+            pass
+
+
+async def admin_handle_reject_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Called from route_text (and cmd_skip_reject) when an admin has been
+    prompted for a rejection reason after tapping REJECT on a notification.
+    """
+    user_id = update.effective_user.id if update.effective_user else None
+    if not user_id or not Config.is_admin(user_id):
+        return
+
+    payment_id = context.user_data.pop("awaiting_reject_payment", None)
+    if not payment_id:
+        return
+
+    text   = (update.message.text or "").strip()
+    reason = None if text.lower() in ("/skip", "skip") else (text or None)
+
+    ok, err = await reject_payment(payment_id, user_id, reason)
+    payment = await get_payment(payment_id)
+
+    if ok:
+        ref         = payment["payment_ref"] if payment else f"#{payment_id}"
+        status_text = f"✅ *Payment {escape_md(ref)} rejected.*"
+    else:
+        status_text = f"❌ *Rejection failed:* {escape_md(err or 'Unknown error')}"
+
+    await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+
+    # Notify the user
+    if ok and payment:
+        try:
+            reason_line = f"\n*Reason:* {escape_md(reason)}" if reason else ""
+            await context.bot.send_message(
+                chat_id    = payment["user_id"],
+                text       = (
+                    f"❌ *Payment Rejected*\n\n"
+                    f"Your payment of {format_inr(payment['amount_inr'])} was not approved."
+                    f"{reason_line}\n\n"
+                    f"Contact {md_username(Config.SUPPORT_USERNAME)} for help."
+                ),
+                parse_mode = ParseMode.MARKDOWN,
+            )
+        except Exception as exc:
+            logger.warning("Could not notify user %d of rejection: %s", payment.get("user_id"), exc)
+
+    logger.info("Admin %d %s payment %d via shop_bot notification", user_id, "rejected" if ok else "FAILED to reject", payment_id)
+
 
 async def cancel_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel payment. Works whether current message is photo or text."""
     context.user_data.pop("awaiting_screenshot", None)
     context.user_data.pop("pending_payment", None)
 
-    cancel_text  = "❌ *Payment cancelled\\.*\n\nYour pending payment has been cancelled\\."
+    cancel_text  = "❌ *Payment cancelled.*\n\nYour pending payment has been cancelled."
     cancel_kb    = _kb_back_main()
 
     if update.callback_query:
@@ -1132,18 +1641,24 @@ async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not orders:
         await _send(update,
-            "📋 *ORDER HISTORY*\n\nNo orders yet\\. Start shopping\\!",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Browse Store", callback_data="store"),
-                                   InlineKeyboardButton("◀️ Back", callback_data="main_menu")]]))
+            "📋 *ORDER HISTORY*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "You haven't placed any orders yet — but that's about to change! 😄\n\n"
+            "Browse our store, pick something you like, and your entire "
+            "order history will appear here for easy access.",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛒  Browse Store", callback_data="store")],
+                [InlineKeyboardButton("🏠  Main Menu",    callback_data="main_menu")],
+            ]))
         return
 
-    text  = "📋 *ORDER HISTORY* \\(last 10\\)\n\n"
+    text  = "📋 *ORDER HISTORY*\n━━━━━━━━━━━━━━━━━━━━\n_Showing your last 10 orders_\n\n"
     rows  = []
     for o in orders:
         dt  = parse_utc(str(o.get("created_at", "")))
-        ds  = dt.strftime("%Y\\-%m\\-%d") if dt else "Unknown"
+        ds  = dt.strftime("%Y-%m-%d") if dt else "Unknown"
         pn  = escape_md(str(o.get("product_name", "Unknown")))
-        text += f"• #{o['id']} — {pn} ×{o['quantity']} — {format_currency(float(o['total_price']))} \\({ds}\\)\n"
+        text += f"• #{o['id']} — {pn} ×{o['quantity']} — {format_currency(float(o['total_price']))} ({ds})\n"
         rows.append([InlineKeyboardButton(
             f"📦 Order #{o['id']}", callback_data=f"order:{o['id']}"
         )])
@@ -1171,13 +1686,15 @@ async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     status = order.get("status", "completed").capitalize()
     pname  = escape_md(str(order.get("product_name", "Unknown")))
 
+    status_emoji = {"Completed":"✅","Refunded":"🔄","Cancelled":"❌"}.get(status,"📦")
     text = (
-        f"📦 *ORDER #{order_id}*\n\n"
-        f"Product: {pname}\n"
-        f"Qty: {order['quantity']}\n"
-        f"Total: {format_currency(float(order['total_price']))}\n"
-        f"Status: {escape_md(status)}\n"
-        f"Date: {escape_md(ds)}\n"
+        f"📦 *ORDER #{order_id}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🏷️ *Product:* {pname}\n"
+        f"🔢 *Quantity:* {order['quantity']}\n"
+        f"💰 *Total Paid:* {format_currency(float(order['total_price']))}\n"
+        f"{status_emoji} *Status:* {escape_md(status)}\n"
+        f"📅 *Date:* {escape_md(ds)}\n"
     )
     if order.get("promo_code"):
         text += f"Promo: `{escape_md(order['promo_code'])}`\n"
@@ -1217,10 +1734,15 @@ async def handle_refund(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await _send(update,
-        f"🔄 *REFUND REQUESTED*\n\n"
-        f"Order #{order_id}\n"
-        f"Our team will review and respond within 24 hours\\.\n\n"
-        f"Contact @{Config.SUPPORT_USERNAME} for urgent issues\\.",
+        f"🔄 *REFUND REQUEST SUBMITTED*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ Your refund request for *Order #{order_id}* has been received.\n\n"
+        f"📋 *What happens next:*\n"
+        f"• Our team reviews all refund requests manually\n"
+        f"• You will receive a decision within *24 hours*\n"
+        f"• If approved, balance is credited to your wallet instantly\n\n"
+        f"⚡ For urgent issues, contact us directly:\n"
+        f"📩 {md_username(Config.SUPPORT_USERNAME)}",
         _kb_back_main())
 
 
@@ -1236,17 +1758,23 @@ async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     stats    = await get_referral_stats(user["user_id"])
     bot_user = await context.bot.get_me()
-    ref_link = f"https://t\\.me/{bot_user.username}?start={user.get('referral_code','')}"
+    ref_link = f"https://t.me/{bot_user.username}?start={user.get('referral_code','')}"
 
     text = (
-        f"🎁 *REFERRAL PROGRAM*\n\n"
-        f"Your code: `{user.get('referral_code','N/A')}`\n"
-        f"Your link: `{ref_link}`\n\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"📊 *Your Stats:*\n"
-        f"• Referrals: {stats['total_referrals']}\n"
-        f"• Earned: {format_currency(stats['total_earnings'])}\n\n"
-        f"💰 Earn *{Config.REFERRAL_PERCENT}%* when your referral makes their first purchase\\!"
+        f"🎁 *REFERRAL PROGRAM*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Invite friends and earn *{Config.REFERRAL_PERCENT}% commission* "
+        f"every time one of them makes their *first purchase*. "
+        f"There's no limit — the more you refer, the more you earn!\n\n"
+        f"🔗 *Your Referral Link:*\n"
+        f"`{ref_link}`\n\n"
+        f"🏷️ *Your Code:* `{user.get('referral_code','N/A')}`\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *Your Earnings Summary:*\n"
+        f"👥 Friends Referred: *{stats['total_referrals']}*\n"
+        f"💸 Total Earned: *{format_currency(stats['total_earnings'])}*\n\n"
+        f"_Share your link anywhere — Telegram, WhatsApp, socials — "
+        f"and watch your balance grow automatically!_ 🚀"
     )
     await _send(update, text, _kb_back_main())
 
@@ -1258,23 +1786,33 @@ async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _answer(update)
     text = (
-        f"❓ *HELP*\n\n"
-        f"*How to buy:*\n"
-        f"Store → Category → Product → Quantity → Confirm\n\n"
-        f"*Add funds:*\n"
-        f"Add Funds → Enter ₹ amount → Pay UPI → Send screenshot\n\n"
-        f"*Promo codes:*\n"
-        f"Enter during checkout before confirming\n\n"
-        f"*Referrals:*\n"
-        f"Earn {Config.REFERRAL_PERCENT}% on your referral's first purchase\n\n"
-        f"*Refunds:*\n"
-        f"OTP issues only — tap Refund in your order details\n\n"
-        f"*Commands:* /start /help\n\n"
-        f"*Support:* @{Config.SUPPORT_USERNAME}"
+        f"❓ *HELP & FAQ*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🛒 *How to Buy*\n"
+        f"Browse Store → Pick a Category → Choose Product "
+        f"→ Select Quantity → Confirm → Items delivered instantly!\n\n"
+        f"💳 *How to Add Funds*\n"
+        f"Tap *Add Funds* → Enter ₹ amount → Scan UPI QR code "
+        f"→ Pay exactly → Send payment screenshot → Wait 5–30 min for approval.\n\n"
+        f"🎟️ *Promo Codes*\n"
+        f"On the purchase summary screen, tap *Apply Promo Code* "
+        f"before confirming. Codes are case-insensitive.\n\n"
+        f"🎁 *Referral Program*\n"
+        f"Share your unique referral link. You earn *{Config.REFERRAL_PERCENT}%* "
+        f"of your friend's first purchase — automatically credited to your wallet.\n\n"
+        f"🔄 *Refunds*\n"
+        f"If your purchased item doesn't work, open your order and "
+        f"tap *Request Refund*. Our team responds within 24 hours.\n\n"
+        f"⭐ *Wishlist*\n"
+        f"Save out-of-stock products and find your favourites quickly.\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 *Commands:* /start · /help · /cancel\n"
+        f"📩 *Support:* {md_username(Config.SUPPORT_USERNAME)}\n"
+        f"_We typically respond within 1 hour._"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📞 Support", url=f"https://t.me/{Config.SUPPORT_USERNAME}"),
-         InlineKeyboardButton("◀️ Back",    callback_data="main_menu")],
+        [InlineKeyboardButton("📩  Contact Support",  url=f"https://t.me/{Config.SUPPORT_USERNAME}")],
+        [InlineKeyboardButton("🏠  Back to Main Menu", callback_data="main_menu")],
     ])
     await _send(update, text, keyboard)
 
@@ -1318,6 +1856,11 @@ async def route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif data.startswith("paid:"):        await handle_paid_button(update, context)
     elif data.startswith("order:"):       await show_order_detail(update, context)
     elif data.startswith("refund:"):      await handle_refund(update, context)
+    elif data.startswith("get_otp:"):     await handle_get_otp(update, context)
+
+    # ── Admin callbacks that come back to shop_bot (notifications sent by shop_bot) ──
+    elif data.startswith("pay:approve:"): await admin_approve_payment(update, context)
+    elif data.startswith("pay:reject:"):  await admin_start_reject_payment(update, context)
 
     else:
         await _answer(update, "Unknown action.", alert=False)
@@ -1332,6 +1875,12 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not update.message or not update.message.text:
         return
 
+    # Admin rejection reason (triggered after tapping REJECT on a notification)
+    if context.user_data.get("awaiting_reject_payment"):
+        if Config.is_admin(update.effective_user.id if update.effective_user else 0):
+            await admin_handle_reject_reason(update, context)
+            return
+
     # Promo code input
     if context.user_data.get("awaiting_promo"):
         await handle_promo_text(update, context)
@@ -1339,12 +1888,29 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     # Ignore unknown text — user should use inline buttons
     await update.message.reply_text(
-        "👆 Please use the buttons to navigate\\.",
+        "👆 *Use the buttons to navigate*\n\n"
+        "This bot is fully button-driven for the best experience. "
+        "Tap *Main Menu* below to get started!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")
+            InlineKeyboardButton("🏠  Main Menu", callback_data="main_menu")
         ]]),
     )
+
+
+async def cmd_skip_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle /skip command.
+    If an admin has been prompted for a rejection reason, treat as 'no reason'.
+    Otherwise ignore silently (user may be trying to cancel something else).
+    """
+    if context.user_data.get("awaiting_reject_payment"):
+        uid = update.effective_user.id if update.effective_user else 0
+        if Config.is_admin(uid):
+            await admin_handle_reject_reason(update, context)
+            return
+    # Not in a rejection flow — treat as a general cancel
+    await cmd_cancel(update, context)
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1353,10 +1919,11 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("pending_payment", None)
     context.user_data.pop("buy", None)
     await update.message.reply_text(
-        "❌ Cancelled\\. Use the menu to continue\\.",
+        "❌ *Cancelled*\n\nNo problem — nothing was changed. "
+        "Head back to the menu whenever you're ready.",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")
+            InlineKeyboardButton("🏠  Back to Main Menu", callback_data="main_menu")
         ]]),
     )
     return ConversationHandler.END
@@ -1371,7 +1938,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         if isinstance(update, Update) and update.effective_message:
             await update.effective_message.reply_text(
-                f"❌ An error occurred\\. Please try again or contact @{Config.SUPPORT_USERNAME}",
+                f"❌ An error occurred. Please try again or contact {md_username(Config.SUPPORT_USERNAME)}",
                 parse_mode=ParseMode.MARKDOWN,
             )
     except Exception:
@@ -1402,7 +1969,25 @@ def main() -> None:
 
     logger.info("🚀 Starting Shop Bot…")
 
-    app = Application.builder().token(Config.SHOP_BOT_TOKEN).build()
+    from telegram.request import HTTPXRequest
+    app = (
+        Application.builder()
+        .token(Config.SHOP_BOT_TOKEN)
+        .request(HTTPXRequest(
+            connection_pool_size = 16,   # more connections for higher user traffic
+            connect_timeout      = 10.0,
+            read_timeout         = 10.0,
+            write_timeout        = 10.0,
+            pool_timeout         = 10.0,  # default 1s causes queuing under load
+        ))
+        .get_updates_request(HTTPXRequest(
+            connection_pool_size = 2,
+            connect_timeout      = 20.0,
+            read_timeout         = 20.0,
+        ))
+        .concurrent_updates(True)
+        .build()
+    )
 
     # Add Funds conversation (amount input only — screenshot handled globally)
     add_funds_conv = ConversationHandler(
@@ -1423,6 +2008,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("help",   show_help))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("skip",   cmd_skip_reject))
 
     # Conversations
     app.add_handler(add_funds_conv)

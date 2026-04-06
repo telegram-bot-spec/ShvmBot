@@ -60,10 +60,16 @@ except Exception as exc:
 #  blocks the asyncio event loop.  No asyncio.run() inside coroutines.
 # ═══════════════════════════════════════════════════════
 
+# Dedicated thread pool for Supabase I/O.
+# Default executor on a 1–2 core VPS has only 5–6 threads; with 16 threads
+# up to 16 concurrent Supabase calls can fly at once instead of queuing.
+from concurrent.futures import ThreadPoolExecutor as _TPE
+_DB_EXECUTOR = _TPE(max_workers=16, thread_name_prefix="supabase")
+
 async def _run(func, *args, **kwargs):
-    """Run a synchronous callable in the default thread-pool executor."""
+    """Run a synchronous callable in the dedicated Supabase thread pool."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+    return await loop.run_in_executor(_DB_EXECUTOR, partial(func, *args, **kwargs))
 
 
 # ═══════════════════════════════════════════════════════
@@ -1356,63 +1362,44 @@ async def get_stats() -> Dict[str, Any]:
     No N+1 queries.
     All time comparisons done in PostgreSQL (UTC-aware).
     """
-    # Revenue + order counts from the view (single query)
-    biz_result = await _run(
-        lambda: supabase.table("v_business_stats").select("*").single().execute()
-    )
-    biz = biz_result.data or {}
+    # ── All stats gathered in parallel — 3 gather() batches instead of 10 sequential calls ──
 
-    # User count
-    user_result = await _run(
-        lambda: supabase.table("users").select("user_id", count="exact").execute()
+    # Batch 1: independent aggregate queries (run concurrently)
+    (
+        biz_result,
+        user_result,
+        prod_result,
+        sales_result,
+        pending_pay,
+        pending_ref,
+    ) = await asyncio.gather(
+        _run(lambda: supabase.table("v_business_stats").select("*").single().execute()),
+        _run(lambda: supabase.table("users").select("user_id", count="exact").execute()),
+        _run(lambda: supabase.table("products").select("id", count="exact").eq("is_active", True).execute()),
+        _run(lambda: supabase.table("v_product_sales").select("total_revenue, total_profit").execute()),
+        _run(lambda: supabase.table("payments").select("id", count="exact").eq("status", "pending").execute()),
+        _run(lambda: supabase.table("refund_requests").select("id", count="exact").eq("status", "pending").execute()),
     )
-    total_users = user_result.count or 0
 
-    # Active products
-    prod_result = await _run(
-        lambda: supabase.table("products")
-            .select("id", count="exact")
-            .eq("is_active", True)
-            .execute()
-    )
+    biz             = biz_result.data or {}
+    total_users     = user_result.count or 0
     active_products = prod_result.count or 0
 
-    # Rank distribution — 4 tiny queries
-    rank_counts: Dict[str, int] = {}
-    for rank in ("Bronze", "Silver", "Gold", "VIP"):
-        r = await _run(
-            lambda rk=rank: supabase.table("users")
-                .select("user_id", count="exact")
-                .eq("rank", rk)
-                .execute()
-        )
-        rank_counts[rank] = r.count or 0
-
-    # Total cost from product_sales_stats view
-    sales_result = await _run(
-        lambda: supabase.table("v_product_sales")
-            .select("total_revenue, total_profit")
-            .execute()
-    )
-    total_revenue = sum(float(r.get("total_revenue", 0)) for r in (sales_result.data or []))
-    total_profit  = sum(float(r.get("total_profit",  0)) for r in (sales_result.data or []))
+    sales_data    = sales_result.data or []
+    total_revenue = sum(float(r.get("total_revenue", 0)) for r in sales_data)
+    total_profit  = sum(float(r.get("total_profit",  0)) for r in sales_data)
     total_cost    = total_revenue - total_profit
     profit_margin = (total_profit / total_revenue * 100) if total_revenue > 0 else 0.0
 
-    # Pending payments count
-    pending_pay = await _run(
-        lambda: supabase.table("payments")
-            .select("id", count="exact")
-            .eq("status", "pending")
-            .execute()
-    )
-    # Pending refunds count
-    pending_ref = await _run(
-        lambda: supabase.table("refund_requests")
-            .select("id", count="exact")
-            .eq("status", "pending")
-            .execute()
-    )
+    # Batch 2: rank distribution — 4 queries in parallel
+    rank_results = await asyncio.gather(*[
+        _run(lambda rk=rank: supabase.table("users").select("user_id", count="exact").eq("rank", rk).execute())
+        for rank in ("Bronze", "Silver", "Gold", "VIP")
+    ])
+    rank_counts = {
+        rank: (r.count or 0)
+        for rank, r in zip(("Bronze", "Silver", "Gold", "VIP"), rank_results)
+    }
 
     return {
         "total_users":       total_users,
@@ -1493,3 +1480,225 @@ if __name__ == "__main__":
         asyncio.run(_stats())
     else:
         print("Usage: python db.py [test|stats]")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  TG ACCOUNTS  (Pyrogram session accounts for OTP delivery)
+#
+#  Schema (tg_accounts table):
+#    id, phone, country, country_flag,
+#    session_string (encrypted), twofa_password (encrypted),
+#    api_id, is_healthy, health_error, last_health_check,
+#    tg_user_id, first_name, last_name, tg_username, bio,
+#    is_premium, dc_id, added_by, added_at,
+#    product_id (FK → products, nullable — which OTP product this serves),
+#    is_sold (bool, default false),
+#    order_id (FK → orders, nullable — set when sold),
+#    assigned_to (FK → users, nullable)
+# ═══════════════════════════════════════════════════════════════════════
+
+@db_op
+async def get_tg_account_by_id(account_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch a single TG account by primary key."""
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .select("*")
+            .eq("id", account_id)
+            .single()
+            .execute()
+    )
+    return result.data if result.data else None
+
+
+@db_op
+async def get_tg_account_by_phone(phone: str) -> Optional[Dict[str, Any]]:
+    """Fetch a TG account by phone number (normalises leading +)."""
+    if not phone.startswith("+"):
+        phone = f"+{phone}"
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .select("*")
+            .eq("phone", phone)
+            .single()
+            .execute()
+    )
+    return result.data if result.data else None
+
+
+@db_op
+async def get_available_tg_account(product_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """
+    Return one healthy, unsold TG account.
+    If product_id is given, restrict to accounts linked to that product.
+    Uses ORDER BY RANDOM() via Supabase to avoid hot-row contention.
+    """
+    q = (
+        supabase.table("tg_accounts")
+        .select("*")
+        .eq("is_sold",    False)
+        .eq("is_healthy", True)
+    )
+    if product_id is not None:
+        q = q.eq("product_id", product_id)
+
+    # Order by added_at to prefer oldest (FIFO) rather than truly random —
+    # random is fine for OTP delivery but FIFO is more predictable for debugging.
+    result = await _run(
+        lambda: q.order("added_at", desc=False).limit(1).execute()
+    )
+    if result.data:
+        return result.data[0]
+    return None
+
+
+@db_op
+async def mark_tg_account_sold(
+    account_id: int,
+    order_id: int,
+    user_id: int,
+) -> bool:
+    """
+    Atomically mark an account as sold and link it to an order + user.
+    Returns False if account is already sold (guard against double-sell).
+    """
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .update({
+                "is_sold":     True,
+                "order_id":    order_id,
+                "assigned_to": user_id,
+                "sold_at":     utcnow().isoformat(),
+            })
+            .eq("id",      account_id)
+            .eq("is_sold", False)   # optimistic lock — only updates if still unsold
+            .execute()
+    )
+    if result.data:
+        logger.info("✅ TG account #%d sold → order %d (user %d)", account_id, order_id, user_id)
+        return True
+    logger.warning("⚠️ TG account #%d already sold — double-sell prevented", account_id)
+    return False
+
+
+@db_op
+async def get_tg_account_for_order(order_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch the TG account that was delivered for a given order."""
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .select("*")
+            .eq("order_id", order_id)
+            .single()
+            .execute()
+    )
+    return result.data if result.data else None
+
+
+@db_op
+async def get_all_tg_accounts(
+    include_sold: bool = True,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """List all TG accounts, newest first."""
+    q = supabase.table("tg_accounts").select("*")
+    if not include_sold:
+        q = q.eq("is_sold", False)
+    result = await _run(
+        lambda: q.order("added_at", desc=True).limit(limit).execute()
+    )
+    return result.data or []
+
+
+@db_op
+async def get_tg_accounts_for_product(product_id: int) -> List[Dict[str, Any]]:
+    """All accounts (sold + unsold) linked to a specific product."""
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .select("*")
+            .eq("product_id", product_id)
+            .order("added_at", desc=True)
+            .execute()
+    )
+    return result.data or []
+
+
+@db_op
+async def link_tg_account_to_product(
+    account_id: int,
+    product_id: int,
+    admin_id:   int,
+) -> bool:
+    """Link (or re-link) a TG account to a specific OTP product."""
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .update({"product_id": product_id})
+            .eq("id", account_id)
+            .execute()
+    )
+    if result.data:
+        await log_admin_action(
+            admin_id, "link_tg_account_product",
+            "tg_account", str(account_id),
+            {"product_id": product_id},
+        )
+        return True
+    return False
+
+
+@db_op
+async def update_tg_account_health(
+    phone:      str,
+    is_healthy: bool,
+    error:      Optional[str] = None,
+) -> bool:
+    """Update health status for a TG account (called by HealthMonitor)."""
+    if not phone.startswith("+"):
+        phone = f"+{phone}"
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .update({
+                "is_healthy":        is_healthy,
+                "health_error":      error[:500] if error else None,
+                "last_health_check": utcnow().isoformat(),
+            })
+            .eq("phone", phone)
+            .execute()
+    )
+    return bool(result.data)
+
+
+@db_op
+async def get_tg_account_stock_count(product_id: int) -> int:
+    """
+    Count healthy, unsold TG accounts linked to product_id.
+    Used by OTP-category products instead of the stock table.
+    """
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .select("id", count="exact")
+            .eq("product_id", product_id)
+            .eq("is_sold",    False)
+            .eq("is_healthy", True)
+            .execute()
+    )
+    return result.count or 0
+
+
+@db_op
+async def unlink_tg_account_from_product(
+    account_id: int,
+    admin_id:   int,
+) -> bool:
+    """Remove product link from a TG account (set product_id = NULL)."""
+    result = await _run(
+        lambda: supabase.table("tg_accounts")
+            .update({"product_id": None})
+            .eq("id", account_id)
+            .execute()
+    )
+    if result.data:
+        await log_admin_action(
+            admin_id, "unlink_tg_account_product",
+            "tg_account", str(account_id), {},
+        )
+        return True
+    return False
