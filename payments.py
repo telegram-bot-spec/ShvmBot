@@ -145,13 +145,13 @@ def msg_payment_instructions(
         f"*Amount:* {format_inr(amount_inr)} (${amount_usd:.2f})\n"
         f"*Payment ID:* `{payment_ref}`\n\n"
         f"📱 *How to pay:*\n"
-        f"1\\. Scan the QR code with any UPI app\n"
-        f"2\\. Or pay manually to: `{Config.UPI_ID}`\n"
-        f"3\\. Amount must be *exactly {format_inr(amount_inr)}*\n"
-        f"4\\. Tap *✅ I've Paid* below after payment\n\n"
+        f"1. Scan the QR code with any UPI app\n"
+        f"2. Or pay manually to: `{Config.UPI_ID}`\n"
+        f"3. Amount must be *exactly {format_inr(amount_inr)}*\n"
+        f"4. Tap *✅ I've Paid* below after payment\n\n"
         f"⚠️ *Important:*\n"
         f"• Wrong amount = automatic rejection\n"
-        f"• Screenshot must clearly show amount \\+ transaction ID\n"
+        f"• Screenshot must clearly show amount + transaction ID\n"
         f"• Support: @{Config.SUPPORT_USERNAME}"
     )
 
@@ -160,13 +160,13 @@ def msg_request_screenshot() -> str:
     """Shown after user taps 'I've Paid' — asks for screenshot."""
     return (
         "📸 *PAYMENT SCREENSHOT*\n\n"
-        "Please send a *clear screenshot* of your payment confirmation\\.\n\n"
+        "Please send a *clear screenshot* of your payment confirmation.\n\n"
         "✅ *Screenshot must show:*\n"
         "• Payment amount\n"
         "• Transaction ID\n"
         "• Date and time\n"
         "• Recipient UPI ID\n\n"
-        "Tap ❌ Cancel below to abort\\."
+        "Tap ❌ Cancel below to abort."
     )
 
 
@@ -174,10 +174,10 @@ def msg_payment_submitted(payment_ref: str) -> str:
     """Confirmation sent to user after screenshot upload."""
     return (
         "✅ *PAYMENT SUBMITTED*\n\n"
-        "Your screenshot is under review\\.\n\n"
+        "Your screenshot is under review.\n\n"
         f"🔖 *Payment ID:* `{payment_ref}`\n"
         "⏱ *Review time:* Usually 5–30 minutes\n\n"
-        "You'll receive a notification once approved\\.\n"
+        "You'll receive a notification once approved.\n"
         f"Questions? Contact @{Config.SUPPORT_USERNAME}"
     )
 
@@ -186,10 +186,10 @@ def msg_payment_approved(amount_inr: int) -> str:
     """DM sent to user when admin approves their payment."""
     amount_usd = Config.inr_to_usd(amount_inr)
     return (
-        "✅ *PAYMENT APPROVED\\!*\n\n"
-        f"{format_inr(amount_inr)} \\(${amount_usd:.2f}\\) has been added to your balance\\.\n\n"
-        "You can now use your balance to make purchases\\!\n"
-        "🛒 Tap *Browse Store* to start shopping\\."
+        "✅ *PAYMENT APPROVED!*\n\n"
+        f"{format_inr(amount_inr)} (${amount_usd:.2f}) has been added to your balance.\n\n"
+        "You can now use your balance to make purchases!\n"
+        "🛒 Tap *Browse Store* to start shopping."
     )
 
 
@@ -197,7 +197,7 @@ def msg_payment_rejected(amount_inr: int, reason: Optional[str] = None) -> str:
     """DM sent to user when admin rejects their payment."""
     lines = [
         "❌ *PAYMENT REJECTED*\n",
-        f"Your payment of {format_inr(amount_inr)} was not approved\\.",
+        f"Your payment of {format_inr(amount_inr)} was not approved.",
     ]
     if reason:
         from config import escape_md
@@ -231,7 +231,7 @@ def msg_admin_new_payment(payment: dict) -> str:
     return (
         f"💰 *PAYMENT REVIEW*\n\n"
         f"*Payment ID:* `{payment['payment_ref']}`\n"
-        f"*Amount:* {format_inr(amount_inr)} \\(${amount_usd:.2f}\\)\n\n"
+        f"*Amount:* {format_inr(amount_inr)} (${amount_usd:.2f})\n\n"
         f"*User:* {name}\n"
         f"*Username:* @{username}\n"
         f"*User ID:* `{payment['user_id']}`\n\n"
